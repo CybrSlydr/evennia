@@ -17,7 +17,9 @@ structure in memory:
   ones are re-cached, created ones are evicted and poisoned (their save raises), handler caches of every
   touched object are reset, and the contents caches of every affected holder are rebuilt;
 - a block that rolls back nothing itself (no savepoint) passes its records up: the enclosing block will roll
-  back.
+  back;
+- a transaction the caller opens itself (autocommit off, an explicit BEGIN: so it can retry its own COMMIT) gets
+  its frame from `begin()`, and is ended with `commit()` or `rollback()` after the caller's COMMIT or ROLLBACK.
 
 Blocks opened inside SharedMemoryModel.save() itself never restore: save() retries a failed write
 without update_fields, and restoring would make the retry write the old values. Non-persistent attributes
@@ -79,6 +81,39 @@ class Frame:
 
 def active():
     return bool(_frames())
+
+
+def begin():
+    """
+    Open the frame of a transaction the caller began itself, outside any `atomic()` (autocommit off, an explicit
+    BEGIN), so that the caller can retry its own COMMIT. An `atomic()` block inside it is then a savepoint whose
+    records, on success, pass up to this frame instead of being dropped. The caller ends it with `commit()` once its
+    COMMIT has landed, or `rollback()` once its ROLLBACK has run.
+
+    """
+    frames = _frames()
+    if frames:
+        raise RuntimeError("transactional.begin(): a transaction's frame is already open")
+    frame = Frame(None, True, False)
+    frame.owned = True
+    frames.append(frame)
+
+
+def _owned():
+    frames = _frames()
+    if len(frames) != 1 or not getattr(frames[0], "owned", False):
+        raise RuntimeError("no transaction opened by transactional.begin() is open")
+    return frames.pop()
+
+
+def commit():
+    """The caller's COMMIT landed: drop the frame's records."""
+    _owned()
+
+
+def rollback():
+    """The caller's ROLLBACK has run: restore everything the transaction touched, in place."""
+    restore(_owned())
 
 
 def _row(inst):
