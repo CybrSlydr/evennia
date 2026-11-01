@@ -10,12 +10,14 @@ commit, and was proven outside the suite (Campaign Desk's proof, 2026-10-31).
 """
 
 from django.db import connection, transaction
+from django.test import TransactionTestCase, override_settings
 
 from evennia.objects.models import ObjectDB
-from evennia.objects.objects import DefaultObject
+from evennia.objects.objects import DefaultObject, DefaultRoom
 from evennia.utils import create
 from evennia.utils.idmapper import transactional
-from evennia.utils.test_resources import BaseEvenniaTest
+from evennia.utils.idmapper.models import flush_cache
+from evennia.utils.test_resources import DEFAULT_SETTINGS, BaseEvenniaTest
 
 
 class Rollback(Exception):
@@ -147,3 +149,97 @@ class TestTransactional(BaseEvenniaTest):
         self.assertEqual(ObjectDB.objects.get(pk=self.obj1.pk).db_location_id, self.room2.pk)
         self.assertEqual(self.obj1.db.shine, "bright")
         self.assertConsistent()
+
+
+@override_settings(**DEFAULT_SETTINGS)
+class TestCallerOwnedTransaction(TransactionTestCase):
+    """
+    A transaction the caller opens itself, autocommit off and an explicit BEGIN, so that it can retry its own COMMIT:
+    `transactional.begin()` gives it a frame, and the caller ends it with `commit()` or `rollback()`. These run
+    outside any test-case transaction, on a real BEGIN.
+
+    """
+
+    def setUp(self):
+        self.room1 = create.create_object(DefaultRoom, key="Room", nohome=True)
+        self.room2 = create.create_object(DefaultRoom, key="Room2", nohome=True)
+        self.obj = create.create_object(DefaultObject, key="Obj", location=self.room1, home=self.room1)
+        self.room1.contents, self.room2.contents
+
+    def tearDown(self):
+        if not connection.get_autocommit():
+            connection.rollback()
+            connection.set_autocommit(True)
+        transactional._local.frames = []
+        flush_cache()
+
+    def begin(self):
+        connection.set_autocommit(False, force_begin_transaction_with_broken_autocommit=True)
+        transactional.begin()
+
+    def end(self, landed):
+        if landed:
+            connection.commit()
+            transactional.commit()
+        else:
+            connection.rollback()
+            transactional.rollback()
+        connection.set_autocommit(True)
+
+    def disk(self, obj):
+        return ObjectDB.objects.filter(pk=obj.pk).values_list("db_location_id", flat=True).first()
+
+    def test_a_body_that_succeeds_then_rolled_back_by_the_caller_leaves_memory_as_disk(self):
+        """The body's savepoint is released, so only the caller's frame still holds the before-images."""
+        self.begin()
+        with transaction.atomic():
+            self.obj.location = self.room2
+            self.obj.db.mood = "angry"
+        self.end(landed=False)
+        self.assertEqual(self.obj.location, self.room1)
+        self.assertEqual(self.disk(self.obj), self.room1.pk)
+        self.assertIsNone(self.obj.db.mood)
+        self.assertIn(self.obj, self.room1.contents)
+        self.assertNotIn(self.obj, self.room2.contents)
+
+    def test_a_creation_in_a_body_that_succeeds_is_dead_once_the_caller_rolls_back(self):
+        self.begin()
+        with transaction.atomic():
+            made = create.create_object(DefaultObject, key="Newborn", location=self.room1, home=self.room1)
+        self.end(landed=False)
+        self.assertTrue(made._tx_dead)
+        self.assertFalse(ObjectDB.objects.filter(db_key="Newborn").exists())
+        self.assertNotIn(made, self.room1.contents)
+        with self.assertRaises(transactional.Dead):
+            made.save()
+
+    def test_a_body_that_fails_is_restored_and_the_caller_rolls_back_the_rest(self):
+        self.begin()
+        with transaction.atomic():
+            self.obj.key = "Renamed"  # (a first body, released: its records pass to the caller's frame)
+        with self.assertRaises(ValueError):
+            with transaction.atomic():
+                self.obj.location = self.room2
+                raise ValueError("the body fails")
+        self.assertEqual(self.obj.location, self.room1)  # (restored by the failed body's own savepoint)
+        self.end(landed=False)
+        self.assertEqual((self.obj.key, self.obj.location), ("Obj", self.room1))
+        self.assertEqual(ObjectDB.objects.get(pk=self.obj.pk).db_key, "Obj")
+
+    def test_a_commit_keeps_the_bodys_changes(self):
+        self.begin()
+        with transaction.atomic():
+            self.obj.location = self.room2
+        self.end(landed=True)
+        self.assertEqual(self.obj.location, self.room2)
+        self.assertEqual(self.disk(self.obj), self.room2.pk)
+        self.assertEqual(transactional._frames(), [])
+
+    def test_commit_or_rollback_with_no_frame_begun_is_refused(self):
+        with self.assertRaises(RuntimeError):
+            transactional.rollback()
+        with self.assertRaises(RuntimeError):
+            transactional.commit()
+        transactional.begin()
+        with self.assertRaises(RuntimeError):
+            transactional.begin()  # (one at a time)
