@@ -235,11 +235,36 @@ class TestCallerOwnedTransaction(TransactionTestCase):
         self.assertEqual(self.disk(self.obj), self.room2.pk)
         self.assertEqual(transactional._frames(), [])
 
-    def test_commit_or_rollback_with_no_frame_begun_is_refused(self):
+    def test_an_inner_block_that_fails_inside_a_body_that_succeeds_then_the_caller_rolls_back(self):
+        self.begin()
+        with transaction.atomic():
+            self.obj.key = "Renamed"
+            with self.assertRaises(ValueError):
+                with transaction.atomic():
+                    self.obj.location = self.room2
+                    raise ValueError("the inner block fails")
+            self.assertEqual(self.obj.location, self.room1)  # (the inner block's own rollback)
+        self.assertEqual(self.obj.key, "Renamed")  # (the body's own change stands, until...)
+        self.end(landed=False)
+        self.assertEqual((self.obj.key, self.obj.location), ("Obj", self.room1))  # (...the caller rolls back)
+        self.assertEqual(ObjectDB.objects.get(pk=self.obj.pk).db_key, "Obj")
+        self.assertIn(self.obj, self.room1.contents)
+
+    def test_begin_is_refused_unless_the_callers_own_transaction_is_open(self):
+        with self.assertRaises(RuntimeError):
+            transactional.begin()  # (autocommit on: no transaction of the caller's own)
+        with transaction.atomic():
+            with self.assertRaises(RuntimeError):
+                transactional.begin()  # (inside atomic(): that transaction is Django's to end)
+        self.assertEqual(transactional._frames(), [])
+
+    def test_commit_or_rollback_with_no_frame_begun_is_refused_and_one_frame_at_a_time(self):
         with self.assertRaises(RuntimeError):
             transactional.rollback()
         with self.assertRaises(RuntimeError):
             transactional.commit()
-        transactional.begin()
+        self.begin()
         with self.assertRaises(RuntimeError):
-            transactional.begin()  # (one at a time)
+            transactional.begin()
+        self.end(landed=False)
+        self.assertEqual(transactional._frames(), [])

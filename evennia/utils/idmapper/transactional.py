@@ -83,14 +83,23 @@ def active():
     return bool(_frames())
 
 
-def begin():
+def begin(using=None):
     """
     Open the frame of a transaction the caller began itself, outside any `atomic()` (autocommit off, an explicit
     BEGIN), so that the caller can retry its own COMMIT. An `atomic()` block inside it is then a savepoint whose
     records, on success, pass up to this frame instead of being dropped. The caller ends it with `commit()` once its
-    COMMIT has landed, or `rollback()` once its ROLLBACK has run.
+    COMMIT has landed, or `rollback()` once its ROLLBACK has run, on every path: an exception anywhere after
+    `begin()` included.
+
+    Refused unless that transaction is open on the connection: autocommit off, inside no `atomic()` block.
 
     """
+    connection = connections[using or DEFAULT_DB_ALIAS]
+    if connection.get_autocommit() or connection.in_atomic_block:
+        raise RuntimeError(
+            "transactional.begin(): no transaction of the caller's own is open (turn autocommit off with an "
+            "explicit BEGIN first, outside any atomic() block)"
+        )
     frames = _frames()
     if frames:
         raise RuntimeError("transactional.begin(): a transaction's frame is already open")
