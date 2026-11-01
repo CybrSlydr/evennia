@@ -147,3 +147,26 @@ class TestCooldowns(BaseEvenniaTest):
         self.assertEqual(self.handler.time_left("b", "c"), 4)
         self.assertEqual(self.handler.time_left("a"), 9)
         self.assertEqual(list(self.handler.data.keys()), ["a", "b", "c", "d"])
+
+
+class TestCooldownsClock(BaseEvenniaTest):
+    def test_a_given_clock_is_read_instead_of_the_wall_clock(self):
+        now = [100.0]
+        handler = cooldowns.CooldownHandler(self.char1, clock=lambda: now[0])
+        with patch("evennia.contrib.game_systems.cooldowns.cooldowns.time.time", return_value=1e9):
+            handler.add("a", 10)  # (the wall clock far ahead: never read)
+            self.assertEqual(handler.time_left("a"), 10)
+            self.assertFalse(handler.ready("a"))
+            now[0] = 110.0
+            self.assertTrue(handler.ready("a"))
+            handler.add("b", 5)
+            now[0] = 116.0
+            handler.cleanup()
+            self.assertEqual(list(handler.data.keys()), [])
+
+    def test_with_no_clock_the_wall_clock_is_read(self):
+        with patch("evennia.contrib.game_systems.cooldowns.cooldowns.time.time", return_value=50.0) as wall:
+            handler = cooldowns.CooldownHandler(self.char1)
+            handler.add("a", 10)
+            wall.return_value = 55.0
+            self.assertEqual(handler.time_left("a"), 5)

@@ -134,6 +134,61 @@ class TestBarter(BaseEvenniaCommandTest):
         self.assertEqual(self.tradeitem2.location, self.char2)
         self.assertEqual(self.tradeitem3.location, self.char1)
 
+    def test_a_trade_in_progress_is_saved_and_restored_after_a_restart(self):
+        handler = barter.TradeHandler(self.char1, self.char2)
+        handler.join(self.char2)
+        handler.offer(self.char1, self.tradeitem1)
+        handler.offer(self.char2, self.tradeitem3)
+        handler.accept(self.char1)
+        del self.char1.ndb.tradehandler  # (a restart: what was in memory is gone)
+        del self.char2.ndb.tradehandler
+        restored = barter.TradeHandler.restore(self.char1)
+        self.assertEqual((restored.part_a, restored.part_b), (self.char1, self.char2))
+        self.assertEqual(restored.list(), ([self.tradeitem1], [self.tradeitem3]))
+        self.assertEqual((restored.part_a_accepted, restored.part_b_accepted), (True, False))
+        self.assertIs(self.char2.ndb.tradehandler, restored)
+        self.assertTrue(restored.accept(self.char2))  # (the restored trade settles)
+        self.assertEqual((self.tradeitem1.location, self.tradeitem3.location), (self.char2, self.char1))
+        self.assertIsNone(barter.TradeHandler.restore(self.char1))  # (and its saved state is gone)
+
+    def test_restore_with_no_trade_saved_is_none(self):
+        self.assertIsNone(barter.TradeHandler.restore(self.char2))
+
+    def test_an_offer_no_longer_held_withdraws_both_acceptances_and_moves_nothing(self):
+        handler = barter.TradeHandler(self.char1, self.char2)
+        handler.join(self.char2)
+        handler.offer(self.char1, self.tradeitem1)
+        handler.offer(self.char2, self.tradeitem3)
+        self.tradeitem1.location = self.room1  # (given away while the trade waited)
+        handler.accept(self.char1)
+        self.assertFalse(handler.accept(self.char2))
+        self.assertEqual((handler.part_a_accepted, handler.part_b_accepted), (False, False))
+        self.assertEqual((self.tradeitem1.location, self.tradeitem3.location), (self.room1, self.char2))
+        saved = self.char1.attributes.get(barter.TRADE_STATE)
+        self.assertEqual((saved["a_accepted"], saved["b_accepted"]), (False, False))
+        handler.finish(force=True)
+
+    def test_a_settlement_that_fails_partway_moves_nothing(self):
+        handler = barter.TradeHandler(self.char1, self.char2)
+        handler.join(self.char2)
+        handler.offer(self.char1, self.tradeitem1, self.tradeitem2)
+        handler.offer(self.char2, self.tradeitem3)
+        handler.accept(self.char1)
+        self.char1.attributes.remove = Mock(side_effect=RuntimeError("fails after the goods moved"))
+        try:
+            with self.assertRaises(RuntimeError):
+                handler.accept(self.char2)
+        finally:
+            del self.char1.attributes.remove
+        self.assertEqual(
+            [self.tradeitem1.location, self.tradeitem2.location, self.tradeitem3.location],
+            [self.char1, self.char1, self.char2],
+        )
+        self.assertEqual(
+            sorted(o.key for o in self.char2.contents if o.key.startswith("TradeItem")), ["TradeItem3"]
+        )
+        handler.finish(force=True)
+
     def test_cmdtradehelp(self):
         self.call(
             barter.CmdTrade(),
