@@ -93,16 +93,26 @@ class CooldownHandler:
     - clear(): Resets all cooldowns.
     """
 
-    __slots__ = ("data", "db_attribute", "obj")
+    __slots__ = ("data", "db_attribute", "obj", "clock")
 
-    def __init__(self, obj, db_attribute="cooldowns"):
+    def __init__(self, obj, db_attribute="cooldowns", clock=None):
+        """
+        Args:
+            clock (callable, optional): Returns the current time in seconds. Defaults to the wall
+                clock (`time.time`); pass a game clock to have cooldowns follow game time.
+        """
         if not obj.attributes.has(db_attribute):
             obj.attributes.add(db_attribute, {})
 
         self.data = obj.attributes.get(db_attribute)
         self.obj = obj
+        self.clock = clock
         self.db_attribute = db_attribute
         self.cleanup()
+
+    def _now(self):
+        """The current time from the given clock, else the wall clock (looked up on each call)."""
+        return self.clock() if self.clock else time.time()
 
     @property
     def all(self):
@@ -137,7 +147,7 @@ class CooldownHandler:
             float or int: Number of seconds until all provided cooldowns are
                 ready. Returns 0 if all cooldowns are ready (or don't exist.)
         """
-        now = time.time()
+        now = self._now()
         cooldowns = [self.data[x] - now for x in args if x in self.data]
         if not cooldowns:
             return 0 if use_int else 0.0
@@ -155,7 +165,7 @@ class CooldownHandler:
             seconds (float or int): The number of seconds before this cooldown
                 is ready again.
         """
-        now = time.time()
+        now = self._now()
         self.data[cooldown] = now + (max(seconds, 0) if seconds else 0)
 
     set = add
@@ -198,7 +208,7 @@ class CooldownHandler:
         Deletes all expired cooldowns. This helps keep attribute storage
         requirements small.
         """
-        now = time.time()
+        now = self._now()
         cooldowns = dict(self.data)
         keys = [x for x in cooldowns.keys() if cooldowns[x] - now < 0]
         if keys:
