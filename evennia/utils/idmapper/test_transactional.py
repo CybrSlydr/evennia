@@ -256,6 +256,12 @@ class TestCallerOwnedTransaction(TransactionTestCase):
         with transaction.atomic():
             with self.assertRaises(RuntimeError):
                 transactional.begin()  # (inside atomic(): that transaction is Django's to end)
+        connection.set_autocommit(False)  # (autocommit off, but on SQLite no BEGIN: no transaction yet)
+        try:
+            with self.assertRaises(RuntimeError):
+                transactional.begin()
+        finally:
+            connection.set_autocommit(True)
         self.assertEqual(transactional._frames(), [])
 
     def test_commit_or_rollback_with_no_frame_begun_is_refused_and_one_frame_at_a_time(self):
