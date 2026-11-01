@@ -11,6 +11,7 @@ import gc
 import os
 import threading
 import time
+from evennia.utils.idmapper import transactional as _tx
 from weakref import WeakValueDictionary
 
 from django.core.exceptions import FieldError, ObjectDoesNotExist
@@ -417,6 +418,7 @@ class SharedMemoryModel(Model, metaclass=SharedMemoryModelBase):
         Delete the object, clearing cache.
 
         """
+        _tx.before_delete(self)
         self.flush_from_cache()
         self._is_deleted = True
         super().delete(*args, **kwargs)
@@ -447,18 +449,24 @@ class SharedMemoryModel(Model, metaclass=SharedMemoryModelBase):
 
         if _IS_MAIN_THREAD:
             # in main thread - normal operation
-            try:
-                with atomic():
-                    super().save(*args, **kwargs)
-            except DatabaseError:
-                # we handle the 'update_fields did not update any rows' error that
-                # may happen due to timing issues with attributes
-                ufields_removed = kwargs.pop("update_fields", None)
-                if ufields_removed:
+            _creating = _tx.before_save(self)
+            with _tx.internal_save():
+                try:
                     with atomic():
                         super().save(*args, **kwargs)
-                else:
-                    raise
+                except DatabaseError:
+                    # we handle the 'update_fields did not update any rows' error that
+                    # may happen due to timing issues with attributes
+                    ufields_removed = kwargs.pop("update_fields", None)
+                    if ufields_removed:
+                        with atomic():
+                            super().save(*args, **kwargs)
+                    else:
+                        raise
+            if _creating:
+                _tx.after_create(self)
+        elif _tx.active():
+            raise RuntimeError("a save from another thread inside an open transaction is refused")
         else:
             # in another thread; make sure to save in reactor thread
             def _save_callback(cls, *args, **kwargs):

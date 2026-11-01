@@ -11,6 +11,7 @@ which is a non-db version of Attributes.
 
 import fnmatch
 import re
+from evennia.utils.idmapper import transactional as _tx
 from collections import defaultdict
 from collections.abc import Callable
 from copy import copy
@@ -690,6 +691,7 @@ class IAttributeBackend:
         return self._get_cache(key, category)
 
     def _set_cache(self, key, category, attr_obj):
+        _tx.touched_handler(self.obj)
         """
         Update cache.
 
@@ -711,6 +713,7 @@ class IAttributeBackend:
         self._cache_complete = False
 
     def _delete_cache(self, key, category):
+        _tx.touched_handler(self.obj)
         """
         Remove attribute from cache
 

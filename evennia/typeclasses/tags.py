@@ -10,6 +10,7 @@ respective handlers.
 
 """
 
+from evennia.utils.idmapper import transactional as _tx
 from collections import defaultdict
 from typing import Any, Literal, overload
 
@@ -430,6 +431,7 @@ class TagHandler(object):
         return []
 
     def _setcache(self, key, category, tag_obj):
+        _tx.touched_handler(self.obj)
         """
         Update cache.
 
@@ -455,6 +457,7 @@ class TagHandler(object):
         self._cache_complete = False
 
     def _delcache(self, key, category):
+        _tx.touched_handler(self.obj)
         """
         Remove tag from cache
 
