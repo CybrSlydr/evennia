@@ -94,11 +94,15 @@ in-game.
 
 """
 
+from django.db import transaction
+
 from evennia.commands.cmdset import CmdSet
 from evennia.commands.command import Command
+from evennia.objects.models import ObjectDB
 from evennia.scripts.scripts import DefaultScript
 
 TRADE_TIMEOUT = 60  # timeout for B to accept trade
+TRADE_STATE = "trade_state"  # attribute on part A holding the negotiation, so it survives a restart
 
 
 class TradeTimeout(DefaultScript):
@@ -166,6 +170,56 @@ class TradeHandler(object):
         self.part_b_offers = []
         self.part_a_accepted = False
         self.part_b_accepted = False
+        self.save()
+
+    def save(self):
+        """
+        Store the negotiation as an Attribute on part A, so it survives a server restart.
+
+        """
+        self.part_a.attributes.add(
+            TRADE_STATE,
+            {
+                "part_b": self.part_b.id,
+                "started": self.trade_started,
+                "a_offers": [obj.id for obj in self.part_a_offers],
+                "b_offers": [obj.id for obj in self.part_b_offers],
+                "a_accepted": self.part_a_accepted,
+                "b_accepted": self.part_b_accepted,
+            },
+        )
+
+    @classmethod
+    def restore(cls, part_a):
+        """
+        Rebuild a negotiation stored by `save` (after a restart).
+
+        Args:
+            part_a (object): The party that started the trade.
+
+        Returns:
+            handler (TradeHandler or None): The restored trade, or None if there is none.
+
+        """
+        state = part_a.attributes.get(TRADE_STATE)
+        if not state:
+            return None
+        handler = cls.__new__(cls)
+        handler.part_a = part_a
+        handler.part_b = ObjectDB.objects.get(id=state["part_b"])
+        handler.trade_started = state["started"]
+        handler.part_a_offers = [ObjectDB.objects.get(id=i) for i in state["a_offers"]]
+        handler.part_b_offers = [ObjectDB.objects.get(id=i) for i in state["b_offers"]]
+        handler.part_a_accepted = state["a_accepted"]
+        handler.part_b_accepted = state["b_accepted"]
+        part_a.ndb.tradehandler = handler
+        part_a.cmdset.delete("cmdset_trade")  # (no duplicate when restoring over a live trade)
+        part_a.cmdset.add(CmdsetTrade())
+        if handler.trade_started:
+            handler.part_b.ndb.tradehandler = handler
+            handler.part_b.cmdset.delete("cmdset_trade")
+            handler.part_b.cmdset.add(CmdsetTrade())
+        return handler
 
     def msg_other(self, sender, string):
         """
@@ -215,6 +269,7 @@ class TradeHandler(object):
             self.part_b.ndb.tradehandler = self
             self.part_b.cmdset.add(CmdsetTrade())
             self.trade_started = True
+            self.save()
             return True
         return False
 
@@ -252,6 +307,7 @@ class TradeHandler(object):
                 self.part_b_offers = list(args)
             else:
                 raise ValueError
+            self.save()
 
     def list(self):
         """
@@ -315,6 +371,7 @@ class TradeHandler(object):
                 self.part_b_accepted = True
             else:
                 raise ValueError
+            self.save()
             return self.finish()  # try to close the deal
         return False
 
@@ -339,11 +396,13 @@ class TradeHandler(object):
             if party == self.part_a:
                 if self.part_a_accepted:
                     self.part_a_accepted = False
+                    self.save()
                     return True
                 return False
             elif party == self.part_b:
                 if self.part_b_accepted:
                     self.part_b_accepted = False
+                    self.save()
                     return True
                 return False
             else:
@@ -364,13 +423,24 @@ class TradeHandler(object):
         """
         fin = False
         if self.trade_started and self.part_a_accepted and self.part_b_accepted:
-            # both accepted - move objects before cleanup
-            for obj in self.part_a_offers:
-                obj.location = self.part_b
-            for obj in self.part_b_offers:
-                obj.location = self.part_a
+            # both accepted - each party must still hold what it offered; then all goods move, or none
+            held = all(obj.location == self.part_a for obj in self.part_a_offers) and all(
+                obj.location == self.part_b for obj in self.part_b_offers
+            )
+            if not held:
+                self.part_a_accepted = self.part_b_accepted = False
+                self.save()
+                return False
+            with transaction.atomic():
+                for obj in self.part_a_offers:
+                    obj.location = self.part_b
+                for obj in self.part_b_offers:
+                    obj.location = self.part_a
+                self.part_a.attributes.remove(TRADE_STATE)
             fin = True
         if fin or force:
+            if not fin:
+                self.part_a.attributes.remove(TRADE_STATE)
             # cleanup
             self.part_a.cmdset.delete("cmdset_trade")
             self.part_b.cmdset.delete("cmdset_trade")
